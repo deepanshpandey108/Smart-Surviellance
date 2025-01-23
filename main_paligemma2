@@ -1,0 +1,116 @@
+import cv2
+import mediapipe as mp
+import time
+from datetime import datetime
+import numpy as np
+import tensorflow as tf
+import tensorflow_hub as hub
+
+# Mediapipe face and pose setup
+mp_face_mesh = mp.solutions.face_mesh
+mp_pose = mp.solutions.pose
+face_mesh = mp_face_mesh.FaceMesh(min_detection_confidence=0.7, min_tracking_confidence=0.7)
+pose = mp_pose.Pose(min_detection_confidence=0.7, min_tracking_confidence=0.7)
+
+# Load the SSD MobileNet V2 model from TensorFlow Hub
+ssd_model = hub.load("https://tfhub.dev/google/openimages_v4/ssd/mobilenet_v2/1")
+
+# Define the relevant classes for detection
+coco_classes = {
+    1: "person", 44: "bottle", 45: "wine glass", 46: "cup", 47: "fork",
+    48: "knife", 49: "spoon", 77: "cell phone", 85: "toothbrush", 88: "gun"
+}
+relevant_classes = ["knife", "gun", "person"]
+
+def preprocess_frame(frame):
+    """Preprocess the frame to fit SSD MobileNet V2 input requirements."""
+    resized_frame = tf.image.resize(frame, (300, 300))  # Resize to 300x300
+    normalized_frame = resized_frame / 255.0  # Normalize to [0, 1]
+    return tf.expand_dims(normalized_frame, axis=0)  # Add batch dimension
+
+def draw_boxes(frame, detections, classes, scores, threshold=0.5):
+    """Draw bounding boxes on the frame."""
+    h, w, _ = frame.shape
+    for i in range(len(scores)):
+        if scores[i] > threshold:
+            class_id = int(classes[i])
+            if coco_classes.get(class_id) in relevant_classes:
+                ymin, xmin, ymax, xmax = detections[i]
+                (x1, y1, x2, y2) = int(xmin * w), int(ymin * h), int(xmax * w), int(ymax * h)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                label = coco_classes.get(class_id)
+                confidence = scores[i]
+                cv2.putText(frame, f"{label} {confidence:.2f}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
+
+def calculate_face_coverage(face_landmarks, brightness):
+    critical_landmarks = [33, 133, 362, 263, 1, 2, 98, 324, 13, 14]
+    visible_landmarks = 0
+    for idx in critical_landmarks:
+        if face_landmarks[idx].visibility > 0.6:
+            visible_landmarks += 1
+    return (visible_landmarks / len(critical_landmarks)) * 100
+
+def analyze_behavior(pose_landmarks):
+    left_hand_y = pose_landmarks[mp_pose.PoseLandmark.LEFT_WRIST].y
+    right_hand_y = pose_landmarks[mp_pose.PoseLandmark.RIGHT_WRIST].y
+    nose_y = pose_landmarks[mp_pose.PoseLandmark.NOSE].y
+    return left_hand_y < nose_y or right_hand_y < nose_y
+
+cap = cv2.VideoCapture("sample.mp4")
+alert_message = "Warning: Potential Threat!"
+alert_duration = 3
+last_alert_time = 0
+
+while True:
+    success, frame = cap.read()
+    if not success:
+        break
+
+    gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    brightness = np.mean(gray_frame)
+    image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
+    face_results = face_mesh.process(image_rgb)
+    pose_results = pose.process(image_rgb)
+
+    if face_results.multi_face_landmarks:
+        for face_landmarks in face_results.multi_face_landmarks:
+            coverage = calculate_face_coverage(face_landmarks.landmark, brightness)
+            if coverage < 20:
+                current_time = time.time()
+                if current_time - last_alert_time > alert_duration:
+                    cv2.putText(frame, alert_message, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
+                    filename = f"warning_image_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+                    cv2.imwrite(filename, frame)
+                    last_alert_time = current_time
+
+    if pose_results.pose_landmarks:
+        if analyze_behavior(pose_results.pose_landmarks.landmark):
+            cv2.putText(frame, "Unusual Behavior Detected!", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
+            filename = f"behavior_warning_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+            cv2.imwrite(filename, frame)
+
+    # Preprocess the frame before passing it to the model
+    preprocessed_frame = preprocess_frame(image_rgb)
+
+    # Get the detection function from the model
+    detection_function = ssd_model.signatures['default']
+
+# Run the model and get the results
+    result = detection_function(preprocessed_frame)
+
+# Print the keys of the result to understand its structure
+    print(result.keys())  # This will print all available keys in the output
+
+    detections = result["detection_boxes"].numpy()[0]  # Detection boxes
+    scores = result["detection_scores"].numpy()[0]  # Detection scores
+    classes = result["detection_classes"].numpy()[0]  # Detection class IDs
+
+    draw_boxes(frame, detections, classes, scores)
+
+    cv2.imshow("Surveillance System", frame)
+    if cv2.waitKey(1) & 0xFF == ord("q"):
+        break
+
+cap.release()
+cv2.destroyAllWindows()
