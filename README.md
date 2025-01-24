@@ -1,0 +1,1 @@
+Its a projects that takes perform real time surviellance using computer vision and detects unusual behaviour using mediapipe. Also it has been trained to detect weapon and issue an immediate alert as well as an alarm when weapon is detected. Whenever such a threat is detected it also captures an image int database for further investigation and reporting purposes.
