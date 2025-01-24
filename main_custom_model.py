@@ -1,59 +1,61 @@
+import os
 import cv2
 import mediapipe as mp
 import time
 from datetime import datetime
 import numpy as np
 from tensorflow.keras.models import load_model
+from playsound import playsound  
+import threading  
 
 mp_face_mesh = mp.solutions.face_mesh
 mp_pose = mp.solutions.pose
 face_mesh = mp_face_mesh.FaceMesh(min_detection_confidence=0.7, min_tracking_confidence=0.7)
 pose = mp_pose.Pose(min_detection_confidence=0.7, min_tracking_confidence=0.7)
 
-weapon_model = load_model("object_classifier_cv.h5")
+weapon_model = load_model("knife_classifier_model.h5")
 
-classes = ["gun", "knife", "smartphone", "credit_card"]
+classes = ["not_knife", "knife"]
 
-def preprocess_frame(frame, img_height=150, img_width=150):
+SAVE_DIR = "detected_images"
+os.makedirs(SAVE_DIR, exist_ok=True)
+
+ALARM_SOUND = "alarm.wav"  
+alarm_playing = False  
+
+def preprocess_frame(frame, img_height=224, img_width=224):
     """Preprocess the frame for classification."""
     image = cv2.resize(frame, (img_height, img_width))  
     image = image / 255.0  
     image = np.expand_dims(image, axis=0)  
     return image
 
-def calculate_face_coverage(face_landmarks, brightness):
-    """Calculate face coverage based on critical landmarks."""
-    critical_landmarks = [33, 133, 362, 263, 1, 2, 98, 324, 13, 14]
-    total_landmarks = len(critical_landmarks)
-    visible_landmarks = 0
+def draw_text_with_background(frame, text, position, font=cv2.FONT_HERSHEY_SIMPLEX, font_scale=0.5, 
+                              text_color=(255, 255, 255), background_color=(0, 0, 255), thickness=1):
+    """Draw text with a background rectangle."""
+    text_size, _ = cv2.getTextSize(text, font, font_scale, thickness)
+    text_w, text_h = text_size
+    x, y = position
 
-    visibility_threshold = 0.6 - (brightness / 255.0) * 0.2
-    z_threshold_min = -0.1 - (brightness / 255.0) * 0.05
-    z_threshold_max = 0.1 + (brightness / 255.0) * 0.05
+    cv2.rectangle(frame, (x, y - text_h - 5), (x + text_w + 10, y + 5), background_color, -1)
+    cv2.putText(frame, text, (x, y), font, font_scale, text_color, thickness)
 
-    for idx in critical_landmarks:
-        landmark = face_landmarks[idx]
-        if landmark.visibility > visibility_threshold and z_threshold_min < landmark.z < z_threshold_max:
-            visible_landmarks += 1
+def save_detected_frame(frame, label):
+    """Save the current frame with a unique filename."""
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    filename = f"{SAVE_DIR}/{label}_{timestamp}.jpg"
+    cv2.imwrite(filename, frame)
+    print(f"Saved image: {filename}")
 
-    coverage = (visible_landmarks / total_landmarks) * 100
-    return coverage
+def play_alarm():
+    """Play the alarm sound in a separate thread."""
+    global alarm_playing
+    if not alarm_playing:  
+        alarm_playing = True
+        playsound(ALARM_SOUND)
+        alarm_playing = False
 
-def analyze_behavior(pose_landmarks):
-    """Analyze unusual behavior based on hand positions."""
-    left_hand_y = pose_landmarks[mp_pose.PoseLandmark.LEFT_WRIST].y
-    right_hand_y = pose_landmarks[mp_pose.PoseLandmark.RIGHT_WRIST].y
-    nose_y = pose_landmarks[mp_pose.PoseLandmark.NOSE].y
-
-    if left_hand_y < nose_y or right_hand_y < nose_y:
-        return True
-    return False
-
-#cap = cv2.VideoCapture("sample2.mp4")
 cap = cv2.VideoCapture(0)
-alert_message = "Warning: Potential Threat!"
-alert_duration = 3
-last_alert_time = 0
 
 while True:
     success, frame = cap.read()
@@ -65,48 +67,33 @@ while True:
 
     image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
-    face_results = face_mesh.process(image_rgb)
     pose_results = pose.process(image_rgb)
-
     unusual_behavior_detected = False
 
-    if face_results.multi_face_landmarks:
-        for face_landmarks in face_results.multi_face_landmarks:
-            coverage = calculate_face_coverage(face_landmarks.landmark, brightness)
-            print(f"Coverage: {coverage:.2f}% (Brightness: {brightness:.2f})")
-
-            if coverage < 20:
-                current_time = time.time()
-                if current_time - last_alert_time > alert_duration:
-                    cv2.putText(frame, alert_message, (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-
-                    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-                    filename = f"warning_image_{timestamp}.jpg"
-                    cv2.imwrite(filename, frame)
-                    last_alert_time = current_time
-
     if pose_results.pose_landmarks:
-        unusual_behavior_detected = analyze_behavior(pose_results.pose_landmarks.landmark)
+        left_hand_y = pose_results.pose_landmarks.landmark[mp_pose.PoseLandmark.LEFT_WRIST].y
+        right_hand_y = pose_results.pose_landmarks.landmark[mp_pose.PoseLandmark.RIGHT_WRIST].y
+        nose_y = pose_results.pose_landmarks.landmark[mp_pose.PoseLandmark.NOSE].y
 
-    if unusual_behavior_detected:
-        cv2.putText(frame, "Unusual Behavior Detected!", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 0), 2)
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        filename = f"behavior_warning_{timestamp}.jpg"
-        cv2.imwrite(filename, frame)
+        if left_hand_y < nose_y or right_hand_y < nose_y:
+            unusual_behavior_detected = True
+            frame_height, frame_width, _ = frame.shape
+            draw_text_with_background(frame, "Unusual Behavior Detected!", 
+                                      position=(10, frame_height - 30), font_scale=0.7, 
+                                      background_color=(255, 0, 0))
+            save_detected_frame(frame, "unusual_behavior")
 
     preprocessed_frame = preprocess_frame(frame)
-    predictions = weapon_model.predict(preprocessed_frame)
-    predicted_class_index = np.argmax(predictions, axis=1)[0]
-    predicted_class = classes[predicted_class_index]
-    confidence = predictions[0][predicted_class_index]
+    prediction = weapon_model.predict(preprocessed_frame)[0][0]  
+    predicted_class = classes[1] if prediction > 0.5 else classes[0]
+    confidence = prediction if prediction > 0.5 else 1 - prediction
 
-    if predicted_class in ["knife", "gun"] and confidence > 0.8:
-        cv2.putText(frame, f"Weapon Detected: {predicted_class} ({confidence:.2f})", (50, 150),
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
-
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        filename = f"weapon_detected_{timestamp}.jpg"
-        cv2.imwrite(filename, frame)
+    if predicted_class == "knife" and confidence >= 0.9:
+        
+        threading.Thread(target=play_alarm, daemon=True).start()
+        draw_text_with_background(frame, f"Weapon Detected: {predicted_class}", (10, 30), font_scale=0.7)
+        draw_text_with_background(frame, f"Confidence: {confidence:.2f}", (10, 60), font_scale=0.7)
+        save_detected_frame(frame, "weapon_detected")
 
     cv2.imshow('Surveillance System', frame)
 
