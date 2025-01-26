@@ -1,1 +1,2 @@
 Its a projects that takes perform real time surviellance using computer vision and detects unusual behaviour using mediapipe. Also it has been trained to detect weapon and issue an immediate alert as well as an alarm when weapon is detected. Whenever such a threat is detected it also captures an image int database for further investigation and reporting purposes.
+However the dataset used has been custom built using only the knife images. So its important note that a better dataset would be able to train the model much better and produce improved results.
